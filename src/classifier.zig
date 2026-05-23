@@ -6,6 +6,21 @@ const dims = vector.stored_dims;
 const scale: i64 = vector.scale;
 /// Lower bound contributed by a single differing binary flag: (scale - 0)^2.
 const flag_penalty: i64 = scale * scale;
+/// Upper bound on cells ranked per query on the stack. The grid's first dimension
+/// is always the highest-variance one (day_of_week, 7 values), so a bucket has at
+/// most 7*bins cells (336 at bins=48). Buckets above this cap fall back to a full
+/// scan, which is still exact.
+const max_ranked_cells = 1024;
+
+const RankedCell = struct {
+    lb: i64,
+    vec_start: u32,
+    vec_count: u32,
+
+    fn lessThan(_: void, a: RankedCell, b: RankedCell) bool {
+        return a.lb < b.lb;
+    }
+};
 
 pub const Decision = struct {
     approved: bool,
@@ -55,27 +70,62 @@ pub const Classifier = struct {
         // 4-bit lower bound is still closer than our current 5th-nearest distance.
         // The branch-and-bound makes this exact; in practice no other bucket qualifies
         // (a differing flag costs scale^2, far beyond any real neighbour distance).
-        self.scanBucket(own, qv, &top);
+        self.scanBucket(own, q, qv, &top);
         for (0..model_mod.bucket_count) |kk| {
             if (kk == own) continue;
             if (bucketLowerBound(q, @intCast(kk)) < top.worst()) {
-                self.scanBucket(@intCast(kk), qv, &top);
+                self.scanBucket(@intCast(kk), q, qv, &top);
             }
         }
         return top;
     }
 
-    fn scanBucket(self: Classifier, key: u4, qv: @Vector(dims, i32), top: *TopK) void {
+    /// Stage 2: branch-and-bound over the bucket's grid cells. Cells are ranked by
+    /// a lower bound on their squared distance to the query (the gap on the two grid
+    /// dimensions); once a cell's bound reaches the current 5th-nearest distance, all
+    /// remaining cells are pruned. Exact, because the bound never overestimates.
+    fn scanBucket(self: Classifier, key: u4, q: vector.QuantizedVector, qv: @Vector(dims, i32), top: *TopK) void {
         const bucket = self.model.buckets[key];
+        if (bucket.vec_count == 0) return;
+        if (bucket.cell_count == 0 or bucket.cell_count > max_ranked_cells) {
+            self.scanRange(bucket.vec_start, bucket.vec_count, qv, top);
+            return;
+        }
+
+        const cells = self.model.cells[bucket.cell_start..][0..bucket.cell_count];
+        const qa: i64 = q[bucket.dim_a];
+        const qb: i64 = q[bucket.dim_b];
+        var ranked: [max_ranked_cells]RankedCell = undefined;
+        for (cells, 0..) |cell, i| {
+            const ga = gap(qa, cell.lo_a, cell.hi_a);
+            const gb = gap(qb, cell.lo_b, cell.hi_b);
+            ranked[i] = .{ .lb = ga * ga + gb * gb, .vec_start = cell.vec_start, .vec_count = cell.vec_count };
+        }
+        const order = ranked[0..cells.len];
+        std.mem.sort(RankedCell, order, {}, RankedCell.lessThan);
+
+        for (order) |cell| {
+            if (cell.lb >= top.worst()) break;
+            self.scanRange(cell.vec_start, cell.vec_count, qv, top);
+        }
+    }
+
+    fn scanRange(self: Classifier, start: u32, count: u32, qv: @Vector(dims, i32), top: *TopK) void {
         const vectors = self.model.vectors;
-        var i: u32 = bucket.vec_start;
-        const end = bucket.vec_start + bucket.vec_count;
+        var i: u32 = start;
+        const end = start + count;
         while (i < end) : (i += 1) {
-            const dist = distanceSq(qv, vectors, i);
-            top.offer(dist, i);
+            top.offer(distanceSq(qv, vectors, i), i);
         }
     }
 };
+
+/// Distance from a point to the closed interval [lo, hi] (0 if inside).
+inline fn gap(q: i64, lo: i32, hi: i32) i64 {
+    if (q < lo) return lo - q;
+    if (q > hi) return q - hi;
+    return 0;
+}
 
 /// Squared Euclidean distance over the 16 stored lanes, widened to i64 so the
 /// 16-lane sum (up to ~6.4e9) cannot overflow.
