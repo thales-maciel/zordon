@@ -2,7 +2,8 @@
 .zig-cache
 zig-out
 rinha-de-backend-2026
-data/resources
+data/resources/references.json
+data/model
 temporary-results
 test/results.json
 .env

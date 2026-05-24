@@ -9,6 +9,8 @@ data/model/*
 !data/model/.gitkeep
 data/resources/*
 !data/resources/.gitkeep
+# committed so the image build (and CI) can generate the model from it
+!data/resources/references.json.gz
 
 test/results.json
 temporary-results/
