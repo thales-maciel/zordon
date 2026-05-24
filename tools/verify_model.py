@@ -16,11 +16,11 @@ SCALE = 10000
 SDIMS = 16
 
 buf = open(BIN, "rb").read()
-magic, count, dims, sdims, scale, bins, bcount = struct.unpack_from("<8sIHHHHH", buf, 0)
-cell_count, buckets_off, cells_off, vectors_off, labels_off = struct.unpack_from("<I4xQQQQ", buf, 24)
-print(f"magic={magic!r} count={count:,} dims={dims} stored={sdims} scale={scale} "
+magic, version, count, dims, sdims, scale, bins, bcount = struct.unpack_from("<8sIIHHHHH", buf, 0)
+cell_count, buckets_off, cells_off, vectors_off, labels_off = struct.unpack_from("<IQQQQ", buf, 28)
+print(f"magic={magic!r} version={version} count={count:,} dims={dims} stored={sdims} scale={scale} "
       f"bins={bins} buckets={bcount} cells={cell_count}")
-assert magic == b"ZORDON2\n" and count == 3_000_000 and dims == 14 and sdims == SDIMS and scale == SCALE
+assert magic == b"ZORDONDB" and version == 1 and count == 3_000_000 and dims == 14 and sdims == SDIMS and scale == SCALE
 
 # vectors: count x 16 i16
 V = np.frombuffer(buf, dtype="<i2", count=count * SDIMS, offset=vectors_off).reshape(count, SDIMS)

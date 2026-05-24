@@ -15,12 +15,17 @@ const vector = @import("vector.zig");
 /// Vectors are reordered so each bucket is contiguous and, within a bucket, each
 /// grid cell is contiguous. A CellEntry therefore names a contiguous vector range
 /// plus the tight [lo,hi] extent of its two grid dimensions (for the lower bound).
-pub const magic = "ZORDON2\n".*;
+/// Stable format identifier — never changes. The layout version lives in the
+/// `version` header field so it can bump independently; `parse` rejects any model
+/// whose version it doesn't understand.
+pub const magic = "ZORDONDB".*;
+pub const format_version: u32 = 1;
 pub const bucket_count = 16;
 pub const default_bins = 48;
 
 pub const Header = extern struct {
     magic: [8]u8,
+    version: u32,
     count: u32,
     dims: u16,
     stored_dims: u16,
@@ -29,7 +34,6 @@ pub const Header = extern struct {
     bucket_count: u16,
     _pad0: u16 = 0,
     cell_count: u32,
-    _pad1: u32 = 0,
     buckets_off: u64,
     cells_off: u64,
     vectors_off: u64,
@@ -113,6 +117,7 @@ pub fn parse(bytes: []align(64) const u8) !Model {
     if (bytes.len < @sizeOf(Header)) return error.InvalidModel;
     const header: *const Header = @ptrCast(bytes.ptr);
     if (!std.mem.eql(u8, &header.magic, &magic)) return error.InvalidModel;
+    if (header.version != format_version) return error.UnsupportedModelVersion;
     if (header.dims != vector.dims or
         header.stored_dims != vector.stored_dims or
         header.scale != vector.scale or
@@ -289,6 +294,7 @@ pub fn build(allocator: std.mem.Allocator, items: []const Item, bins: u16) ![]al
     const header: *Header = @ptrCast(buf.ptr);
     header.* = .{
         .magic = magic,
+        .version = format_version,
         .count = @intCast(count),
         .dims = vector.dims,
         .stored_dims = vector.stored_dims,
@@ -393,6 +399,18 @@ test "build then parse round-trips a tiny model" {
     var total: u32 = 0;
     for (model.buckets) |b| total += b.vec_count;
     try std.testing.expectEqual(@as(u32, 3), total);
+}
+
+test "parse rejects an unknown format version" {
+    const allocator = std.testing.allocator;
+    var items = [_]Item{
+        .{ .vec = q(.{ 0.0, 0.1, 0.2, 0.3, 0.4, -1, -1, 0.1, 0.1, 0, 1, 0, 0.15, 0.01 }), .fraud = false },
+    };
+    const bytes = try build(allocator, &items, 8);
+    defer allocator.free(bytes); // parse returns an error, so it never takes ownership
+    const header: *Header = @ptrCast(bytes.ptr);
+    header.version +%= 1;
+    try std.testing.expectError(error.UnsupportedModelVersion, parse(bytes));
 }
 
 fn q(v: vector.Vector) [vector.stored_dims]i16 {
