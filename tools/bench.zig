@@ -4,6 +4,22 @@ const zordon = @import("zordon");
 /// Microbenchmark for the index search (excludes HTTP + JSON parsing). Queries are
 /// reference vectors sampled from the model itself, so the bucket distribution of
 /// the workload matches the data. Reports per-query latency percentiles.
+const dims = zordon.vector.stored_dims;
+
+/// A query sampled from the model, optionally perturbed on continuous dimensions to
+/// model an unseen transaction (the flag dims that pick the bucket stay fixed).
+fn makeQuery(model: zordon.model.Model, rand: std.Random, perturb: i32) [dims]i16 {
+    const idx = rand.uintLessThan(u32, model.count);
+    var q = model.vectorAt(idx).*;
+    if (perturb == 0) return q;
+    const cont = [_]usize{ 0, 2, 3, 4, 7, 8, 12, 13 };
+    for (cont) |d| {
+        const noise = rand.intRangeAtMost(i32, -perturb, perturb);
+        q[d] = @intCast(std.math.clamp(@as(i32, q[d]) + noise, 0, zordon.vector.scale));
+    }
+    return q;
+}
+
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
@@ -11,6 +27,10 @@ pub fn main(init: std.process.Init) !void {
 
     const path = if (args.len > 1) args[1] else "data/model/references.i16.bin";
     const iters: usize = if (args.len > 2) try std.fmt.parseInt(usize, args[2], 10) else 200_000;
+    // perturb: add noise to a sampled reference vector so the query is "unseen"
+    // (larger d_5², more grid cells visited) — models real test queries, not the
+    // trivially-easy exact dataset members.
+    const perturb: i32 = if (args.len > 3) try std.fmt.parseInt(i32, args[3], 10) else 0;
 
     var model = try zordon.model.load(io, allocator, path);
     defer model.deinit(allocator);
@@ -23,15 +43,13 @@ pub fn main(init: std.process.Init) !void {
     const Clock = std.Io.Clock;
     var checksum: u64 = 0;
     for (0..10_000) |_| {
-        const idx = rand.uintLessThan(u32, model.count);
-        checksum +%= clf.nearest(model.vectorAt(idx).*).idx[0];
+        checksum +%= clf.nearest(makeQuery(model, rand, perturb)).idx[0];
     }
 
     // Throughput: one timestamp pair around the whole loop (no per-query overhead).
     const start = Clock.awake.now(io);
     for (0..iters) |_| {
-        const idx = rand.uintLessThan(u32, model.count);
-        checksum +%= clf.nearest(model.vectorAt(idx).*).idx[0];
+        checksum +%= clf.nearest(makeQuery(model, rand, perturb)).idx[0];
     }
     const elapsed = Clock.awake.now(io);
     const total_ns: f64 = @floatFromInt(start.durationTo(elapsed).nanoseconds);
@@ -40,16 +58,22 @@ pub fn main(init: std.process.Init) !void {
     // Percentiles: per-query timing (slightly inflated by the clock calls themselves).
     const times = try allocator.alloc(u64, iters);
     defer allocator.free(times);
-    for (times) |*slot| {
-        const idx = rand.uintLessThan(u32, model.count);
-        const q = model.vectorAt(idx).*;
+    const scans = try allocator.alloc(u64, iters);
+    defer allocator.free(scans);
+    for (times, scans) |*slot, *sc| {
+        const q = makeQuery(model, rand, perturb);
         const a = Clock.awake.now(io);
         const top = clf.nearest(q);
         const b = Clock.awake.now(io);
         slot.* = @intCast(a.durationTo(b).nanoseconds);
+        sc.* = top.scanned;
         checksum +%= top.idx[0];
     }
     std.mem.sort(u64, times, {}, std.sort.asc(u64));
+    std.mem.sort(u64, scans, {}, std.sort.asc(u64));
+    std.debug.print("  candidates scanned: p50={d} p99={d} max={d}\n", .{
+        scans[iters / 2], scans[iters * 99 / 100], scans[iters - 1],
+    });
 
     const p = struct {
         fn at(ts: []const u64, q: f64) f64 {

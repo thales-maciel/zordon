@@ -6,6 +6,16 @@ const dims = vector.stored_dims;
 const scale: i64 = vector.scale;
 /// Lower bound contributed by a single differing binary flag: (scale - 0)^2.
 const flag_penalty: i64 = scale * scale;
+/// Candidate budget per query. Cells (and buckets) are visited in ascending
+/// lower-bound order, so the nearest candidates are always scanned first. Normal
+/// queries find their 5-NN long before this and the result is exact; only very
+/// "lonely" queries (large d_5², far from all references — rare novel transactions)
+/// hit the cap and get a high-recall approximation. This bounds worst-case latency:
+/// without it, a lonely query scans an entire ~1M-vector bucket (multi-ms), which
+/// saturates the CPU under load and collapses p99. The rules permit any algorithm
+/// (ANN included), so this is a deliberate, measured exactness/latency trade.
+const max_candidates: u32 = 200_000;
+
 /// Upper bound on cells ranked per query on the stack. The grid's first dimension
 /// is always the highest-variance one (day_of_week, 7 values), so a bucket has at
 /// most 7*bins cells (336 at bins=48). Buckets above this cap fall back to a full
@@ -73,6 +83,7 @@ pub const Classifier = struct {
         self.scanBucket(own, q, qv, &top);
         for (0..model_mod.bucket_count) |kk| {
             if (kk == own) continue;
+            if (top.scanned >= max_candidates) break;
             if (bucketLowerBound(q, @intCast(kk)) < top.worst()) {
                 self.scanBucket(@intCast(kk), q, qv, &top);
             }
@@ -107,11 +118,13 @@ pub const Classifier = struct {
         for (order) |cell| {
             if (cell.lb >= top.worst()) break;
             self.scanRange(cell.vec_start, cell.vec_count, qv, top);
+            if (top.scanned >= max_candidates) break;
         }
     }
 
     fn scanRange(self: Classifier, start: u32, count: u32, qv: @Vector(dims, i32), top: *TopK) void {
         const vectors = self.model.vectors;
+        top.scanned += count;
         var i: u32 = start;
         const end = start + count;
         while (i < end) : (i += 1) {
@@ -164,6 +177,8 @@ const TopK = struct {
     dist: [5]i64 = .{std.math.maxInt(i64)} ** 5,
     idx: [5]u32 = .{0} ** 5,
     k: usize,
+    /// Number of candidate vectors distance-checked (for benchmarking).
+    scanned: u32 = 0,
 
     fn worst(self: *const TopK) i64 {
         var w = self.dist[0];

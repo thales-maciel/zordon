@@ -34,6 +34,20 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe);
 
+    const lb_exe = b.addExecutable(.{
+        .name = "zordon-lb",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/lb.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "zordon", .module = zordon_mod },
+            },
+        }),
+    });
+    b.installArtifact(lb_exe);
+
     const run_step = b.step("run", "Run the API server");
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
@@ -73,6 +87,21 @@ pub fn build(b: *std.Build) void {
     const bench_cmd = b.addRunArtifact(bench);
     if (b.args) |args| bench_cmd.addArgs(args);
     bench_step.dependOn(&bench_cmd.step);
+
+    const bench_req = b.addExecutable(.{
+        .name = "bench-req",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/bench_req.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "zordon", .module = zordon_mod }},
+        }),
+    });
+    const bench_req_step = b.step("bench-req", "Per-request cost breakdown over real payloads");
+    const bench_req_cmd = b.addRunArtifact(bench_req);
+    if (b.args) |args| bench_req_cmd.addArgs(args);
+    bench_req_step.dependOn(&bench_req_cmd.step);
 
     const tests = b.addTest(.{
         .root_module = zordon_mod,
