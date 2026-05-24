@@ -1,7 +1,7 @@
 services:
   lb:
     build: .
-    image: ghcr.io/thalesmaciel/zordon:local
+    image: ghcr.io/thales-maciel/zordon:local
     container_name: zordon-lb
     entrypoint: ["/app/zordon-lb"]
     environment:
@@ -22,7 +22,7 @@ services:
 
   api1:
     build: .
-    image: ghcr.io/thalesmaciel/zordon:local
+    image: ghcr.io/thales-maciel/zordon:local
     container_name: zordon-api1
     environment:
       ZORDON_MODEL_PATH: "/app/model/references.i16.bin"
@@ -37,7 +37,7 @@ services:
 
   api2:
     build: .
-    image: ghcr.io/thalesmaciel/zordon:local
+    image: ghcr.io/thales-maciel/zordon:local
     container_name: zordon-api2
     environment:
       ZORDON_MODEL_PATH: "/app/model/references.i16.bin"

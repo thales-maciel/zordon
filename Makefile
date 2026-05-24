@@ -1,4 +1,4 @@
-IMAGE ?= ghcr.io/thalesmaciel/zordon:latest
+IMAGE ?= ghcr.io/thales-maciel/zordon:latest
 PORT ?= 8080
 
 .PHONY: help test build check run sync-data preprocess compose-up compose-down smoke bench image submission clean fmt

@@ -50,8 +50,8 @@ make compose-up
 
 The inferred public image and source repo are:
 
-- `ghcr.io/thalesmaciel/zordon:latest`
-- `https://github.com/thalesmaciel/zordon`
+- `ghcr.io/thales-maciel/zordon:latest`
+- `https://github.com/thales-maciel/zordon`
 
 Build the amd64 image:
 

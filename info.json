@@ -1,7 +1,7 @@
 {
   "participants": ["Thales Maciel"],
-  "social": ["https://github.com/thalesmaciel"],
-  "source-code-repo": "https://github.com/thalesmaciel/zordon",
+  "social": ["https://github.com/thales-maciel"],
+  "source-code-repo": "https://github.com/thales-maciel/zordon",
   "stack": ["zig", "nginx"],
   "open_to_work": false
 }
