@@ -16,21 +16,11 @@ const flag_penalty: i64 = scale * scale;
 /// (ANN included), so this is a deliberate, measured exactness/latency trade.
 const max_candidates: u32 = 200_000;
 
-/// Upper bound on cells ranked per query on the stack. The grid's first dimension
+/// Upper bound on cells examined per query on the stack. The grid's first dimension
 /// is always the highest-variance one (day_of_week, 7 values), so a bucket has at
 /// most 7*bins cells (336 at bins=48). Buckets above this cap fall back to a full
 /// scan, which is still exact.
-const max_ranked_cells = 1024;
-
-const RankedCell = struct {
-    lb: i64,
-    vec_start: u32,
-    vec_count: u32,
-
-    fn lessThan(_: void, a: RankedCell, b: RankedCell) bool {
-        return a.lb < b.lb;
-    }
-};
+const max_cells = 1024;
 
 pub const Decision = struct {
     approved: bool,
@@ -91,33 +81,47 @@ pub const Classifier = struct {
         return top;
     }
 
-    /// Stage 2: branch-and-bound over the bucket's grid cells. Cells are ranked by
-    /// a lower bound on their squared distance to the query (the gap on the two grid
-    /// dimensions); once a cell's bound reaches the current 5th-nearest distance, all
-    /// remaining cells are pruned. Exact, because the bound never overestimates.
+    /// Stage 2: branch-and-bound over the bucket's grid cells. Each cell's lower
+    /// bound is the squared gap to the query over the two grid dimensions; cells are
+    /// visited nearest-bound-first and pruned once a bound reaches the current
+    /// 5th-nearest distance. Exact, because the bound never overestimates.
+    ///
+    /// Visited by repeated min-extraction rather than a full sort: the nearest cell
+    /// tightens the bound immediately, so typically only ~1-9 of the (≤336) cells are
+    /// ever scanned — cheaper than sorting them all every query.
     fn scanBucket(self: Classifier, key: u4, q: vector.QuantizedVector, qv: @Vector(dims, i32), top: *TopK) void {
         const bucket = self.model.buckets[key];
         if (bucket.vec_count == 0) return;
-        if (bucket.cell_count == 0 or bucket.cell_count > max_ranked_cells) {
+        const cells = self.model.cells[bucket.cell_start..][0..bucket.cell_count];
+        if (cells.len == 0 or cells.len > max_cells) {
             self.scanRange(bucket.vec_start, bucket.vec_count, qv, top);
             return;
         }
 
-        const cells = self.model.cells[bucket.cell_start..][0..bucket.cell_count];
         const qa: i64 = q[bucket.dim_a];
         const qb: i64 = q[bucket.dim_b];
-        var ranked: [max_ranked_cells]RankedCell = undefined;
+        // Pass 1: lower bound per cell.
+        var lbs: [max_cells]i64 = undefined;
         for (cells, 0..) |cell, i| {
             const ga = gap(qa, cell.lo_a, cell.hi_a);
             const gb = gap(qb, cell.lo_b, cell.hi_b);
-            ranked[i] = .{ .lb = ga * ga + gb * gb, .vec_start = cell.vec_start, .vec_count = cell.vec_count };
+            lbs[i] = ga * ga + gb * gb;
         }
-        const order = ranked[0..cells.len];
-        std.mem.sort(RankedCell, order, {}, RankedCell.lessThan);
 
-        for (order) |cell| {
-            if (cell.lb >= top.worst()) break;
-            self.scanRange(cell.vec_start, cell.vec_count, qv, top);
+        // Pass 2: scan cells in ascending-bound order (repeated min), pruning the
+        // rest once the nearest unscanned bound is no closer than the 5th-nearest.
+        while (true) {
+            var best_i: usize = cells.len;
+            var best_lb: i64 = std.math.maxInt(i64);
+            for (lbs[0..cells.len], 0..) |lb, i| {
+                if (lb < best_lb) {
+                    best_lb = lb;
+                    best_i = i;
+                }
+            }
+            if (best_i == cells.len or best_lb >= top.worst()) break;
+            lbs[best_i] = std.math.maxInt(i64); // mark scanned
+            self.scanRange(cells[best_i].vec_start, cells[best_i].vec_count, qv, top);
             if (top.scanned >= max_candidates) break;
         }
     }
