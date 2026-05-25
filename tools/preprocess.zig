@@ -10,13 +10,13 @@ pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
 
     if (args.len < 3 or args.len > 4) {
-        std.debug.print("usage: zig build preprocess -- <references.json> <references.bin> [bins]\n", .{});
+        std.debug.print("usage: zig build preprocess -- <references.json> <references.bin> [leaf_size]\n", .{});
         return error.InvalidArguments;
     }
 
     const input_path = args[1];
     const output_path = args[2];
-    const bins: u16 = if (args.len == 4) try std.fmt.parseInt(u16, args[3], 10) else model.default_bins;
+    const leaf_size: u16 = if (args.len == 4) try std.fmt.parseInt(u16, args[3], 10) else model.default_leaf_size;
 
     const input = try std.Io.Dir.cwd().readFileAlloc(io, input_path, allocator, .limited(1_000_000_000));
     defer allocator.free(input);
@@ -28,7 +28,7 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(items);
     try parseReferences(input, items);
 
-    const bytes = try model.build(allocator, items, bins);
+    const bytes = try model.build(allocator, items, leaf_size);
     defer allocator.free(bytes);
 
     var out_file = try std.Io.Dir.cwd().createFile(io, output_path, .{});
@@ -38,7 +38,7 @@ pub fn main(init: std.process.Init) !void {
     try writer.interface.writeAll(bytes);
     try writer.interface.flush();
 
-    std.debug.print("wrote {d} references ({d} bytes, {d} bins) to {s}\n", .{ count, bytes.len, bins, output_path });
+    std.debug.print("wrote {d} references ({d} bytes, leaf_size {d}) to {s}\n", .{ count, bytes.len, leaf_size, output_path });
 }
 
 fn countReferences(input: []const u8) usize {

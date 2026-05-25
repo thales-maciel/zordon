@@ -35,7 +35,7 @@ pub fn main(init: std.process.Init) !void {
     var model = try zordon.model.load(io, allocator, path);
     defer model.deinit(allocator);
     const clf = zordon.classifier.Classifier{ .model = model };
-    std.debug.print("model: {d} vectors, {d} cells\n", .{ model.count, model.cells.len });
+    std.debug.print("model: {d} vectors, {d} kd-nodes\n", .{ model.count, model.nodes.len });
 
     var prng = std.Random.DefaultPrng.init(0x9E3779B97F4A7C15);
     const rand = prng.random();

@@ -16,9 +16,9 @@ const flag_penalty: i64 = scale * scale;
 /// per-instance CPU budget; the cap is kept only as a latency safety valve.
 pub const default_max_candidates: u32 = std.math.maxInt(u32);
 
-/// Upper bound on cells examined per query on the stack (sized for bins<=64:
-/// bins*bins cells). Buckets above this cap fall back to a full scan, still exact.
-const max_cells = 4096;
+/// Fraud decision threshold: a transaction is declined when the fraud fraction of its
+/// 5-NN is >= this (mirrored by `decide` and the early-exit lock).
+const decline_threshold: f32 = 0.6;
 
 pub const Decision = struct {
     approved: bool,
@@ -52,7 +52,7 @@ pub const Classifier = struct {
         }
         const score = @as(f32, @floatFromInt(frauds)) / @as(f32, @floatFromInt(k));
         return .{
-            .approved = score < 0.6,
+            .approved = score < decline_threshold,
             .fraud_score = score,
             .fraud_neighbors = frauds,
             .neighbors = @intCast(k),
@@ -77,58 +77,60 @@ pub const Classifier = struct {
 
         // Stage 1: search the query's own bucket first, then any other bucket whose
         // 4-bit lower bound is still closer than our current 5th-nearest distance.
-        // The branch-and-bound makes this exact; in practice no other bucket qualifies
-        // (a differing flag costs scale^2, far beyond any real neighbour distance).
-        self.scanBucket(own, qv, &top, cap);
+        // Exact; in practice no other bucket qualifies (a differing flag costs scale^2,
+        // far beyond any real neighbour distance).
+        self.searchBucket(own, qv, &top, cap);
         for (0..model_mod.bucket_count) |kk| {
             if (kk == own) continue;
             if (top.scanned >= cap) break;
             if (bucketLowerBound(q, @intCast(kk)) < top.worst()) {
-                self.scanBucket(@intCast(kk), qv, &top, cap);
+                self.searchBucket(@intCast(kk), qv, &top, cap);
             }
         }
         return top;
     }
 
-    /// Stage 2: branch-and-bound over the bucket's grid cells. Each cell's lower
-    /// bound is the squared distance from the query to the cell's full-dimensional
-    /// bounding box; cells are visited nearest-bound-first and pruned once a bound
-    /// reaches the current 5th-nearest distance. Exact, because the box bound never
-    /// overestimates the distance to any member.
-    ///
-    /// Visited by repeated min-extraction rather than a full sort: the nearest cell
-    /// tightens the bound immediately, so typically only ~1-9 of the (≤336) cells are
-    /// ever scanned — cheaper than sorting them all every query.
-    fn scanBucket(self: Classifier, key: u4, qv: @Vector(dims, i32), top: *TopK, cap: u32) void {
+    fn searchBucket(self: Classifier, key: u4, qv: @Vector(dims, i32), top: *TopK, cap: u32) void {
         const bucket = self.model.buckets[key];
         if (bucket.vec_count == 0) return;
-        const cells = self.model.cells[bucket.cell_start..][0..bucket.cell_count];
-        if (cells.len == 0 or cells.len > max_cells) {
-            self.scanRange(bucket.vec_start, bucket.vec_count, qv, top);
-            return;
-        }
+        self.searchTree(bucket.root, qv, top, cap);
+    }
 
-        // Pass 1: full bounding-box lower bound per cell.
-        var lbs: [max_cells]i64 = undefined;
-        for (cells, 0..) |cell, i| {
-            lbs[i] = cellLowerBound(qv, cell.box_lo, cell.box_hi);
-        }
-
-        // Pass 2: scan cells in ascending-bound order (repeated min), pruning the
-        // rest once the nearest unscanned bound is no closer than the 5th-nearest.
-        while (true) {
-            var best_i: usize = cells.len;
-            var best_lb: i64 = std.math.maxInt(i64);
-            for (lbs[0..cells.len], 0..) |lb, i| {
-                if (lb < best_lb) {
-                    best_lb = lb;
-                    best_i = i;
+    /// Stage 2: depth-first traversal of the bucket's KD-tree with bounding-box
+    /// pruning. A node is skipped whole when the squared distance from the query to
+    /// its subtree's bounding box is already >= the current 5th-nearest — exact,
+    /// because the box bound never overestimates. Children are visited nearer-first so
+    /// the 5th-nearest tightens before the farther subtree is even bounds-checked,
+    /// which is what lets an outlier prune nearly the entire tree instead of scanning
+    /// most of a ~1M-vector bucket.
+    fn searchTree(self: Classifier, root: u32, qv: @Vector(dims, i32), top: *TopK, cap: u32) void {
+        const nodes = self.model.nodes;
+        // Stack depth is the tree height; a balanced median-split tree over the
+        // largest bucket is well under 32 deep.
+        var stack: [64]u32 = undefined;
+        var sp: usize = 0;
+        stack[sp] = root;
+        sp += 1;
+        while (sp > 0) {
+            sp -= 1;
+            const node = nodes[stack[sp]];
+            if (boxLowerBound(qv, node.box_lo, node.box_hi) >= top.worst()) continue;
+            if (node.count != 0) {
+                self.scanRange(node.lo, node.count, qv, top);
+                if (top.scanned >= cap) return;
+            } else {
+                // Push the farther child first so the nearer one is popped (and scanned) first.
+                const lb_l = boxLowerBound(qv, nodes[node.lo].box_lo, nodes[node.lo].box_hi);
+                const lb_r = boxLowerBound(qv, nodes[node.hi].box_lo, nodes[node.hi].box_hi);
+                if (lb_l <= lb_r) {
+                    stack[sp] = node.hi;
+                    stack[sp + 1] = node.lo;
+                } else {
+                    stack[sp] = node.lo;
+                    stack[sp + 1] = node.hi;
                 }
+                sp += 2;
             }
-            if (best_i == cells.len or best_lb >= top.worst()) break;
-            lbs[best_i] = std.math.maxInt(i64); // mark scanned
-            self.scanRange(cells[best_i].vec_start, cells[best_i].vec_count, qv, top);
-            if (top.scanned >= cap) break;
         }
     }
 
@@ -143,12 +145,12 @@ pub const Classifier = struct {
     }
 };
 
-/// Squared distance from the query to a cell's axis-aligned bounding box — an exact
-/// lower bound on the distance to any member of the cell. Over all 16 lanes at once:
-/// each lane's gap is (lo - q) when q < lo, (q - hi) when q > hi, else 0 (the two
-/// maxes are mutually exclusive). Widened to i64 before the reduce (16 lanes of up to
-/// ~4e8 would overflow i32).
-inline fn cellLowerBound(qv: @Vector(dims, i32), lo: [dims]i16, hi: [dims]i16) i64 {
+/// Squared distance from the query to a node's axis-aligned bounding box — an exact
+/// lower bound on the distance to any vector in the subtree. Over all 16 lanes at
+/// once: each lane's gap is (lo - q) when q < lo, (q - hi) when q > hi, else 0 (the
+/// two maxes are mutually exclusive). Widened to i64 before the reduce (16 lanes of up
+/// to ~4e8 would overflow i32).
+inline fn boxLowerBound(qv: @Vector(dims, i32), lo: [dims]i16, hi: [dims]i16) i64 {
     const loi: @Vector(dims, i32) = @intCast(@as(@Vector(dims, i16), lo));
     const hii: @Vector(dims, i32) = @intCast(@as(@Vector(dims, i16), hi));
     const zero: @Vector(dims, i32) = @splat(0);

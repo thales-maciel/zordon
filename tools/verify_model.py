@@ -16,11 +16,11 @@ SCALE = 10000
 SDIMS = 16
 
 buf = open(BIN, "rb").read()
-magic, version, count, dims, sdims, scale, bins, bcount = struct.unpack_from("<8sIIHHHHH", buf, 0)
-cell_count, buckets_off, cells_off, vectors_off, labels_off = struct.unpack_from("<IQQQQ", buf, 28)
+magic, version, count, dims, sdims, scale, leaf_size, bcount = struct.unpack_from("<8sIIHHHHH", buf, 0)
+node_count, buckets_off, nodes_off, vectors_off, labels_off = struct.unpack_from("<IQQQQ", buf, 28)
 print(f"magic={magic!r} version={version} count={count:,} dims={dims} stored={sdims} scale={scale} "
-      f"bins={bins} buckets={bcount} cells={cell_count}")
-assert magic == b"ZORDONDB" and version == 2 and count == 3_000_000 and dims == 14 and sdims == SDIMS and scale == SCALE
+      f"leaf_size={leaf_size} buckets={bcount} kd_nodes={node_count}")
+assert magic == b"ZORDONDB" and version == 3 and count == 3_000_000 and dims == 14 and sdims == SDIMS and scale == SCALE
 
 # vectors: count x 16 i16
 V = np.frombuffer(buf, dtype="<i2", count=count * SDIMS, offset=vectors_off).reshape(count, SDIMS)
@@ -36,9 +36,9 @@ hist = (V[:, 5] > -SCALE // 2).astype(np.int64)
 key = (online << 3) | (cardp << 2) | (unk << 1) | hist
 
 ok = True
-print(f"\n{'bkt':>3} {'declared':>10} {'declared_da/db':>14} {'rows_by_key':>12} {'fraud%':>7}")
+print(f"\n{'bkt':>3} {'declared':>10} {'kd_nodes':>9} {'rows_by_key':>12} {'fraud%':>7}")
 for k in range(bcount):
-    vs, vc, cs, cc, da, db, _ = struct.unpack_from("<IIIIBBH", buf, buckets_off + k * 20)
+    vs, vc, root, ncount = struct.unpack_from("<IIII", buf, buckets_off + k * 16)
     in_bucket = key[vs:vs + vc]
     # every vector in [vs, vs+vc) must have key == k
     coherent = bool((in_bucket == k).all()) if vc else True
@@ -47,7 +47,7 @@ for k in range(bcount):
     flag = "" if (coherent and by_key == vc) else "  <-- MISMATCH"
     if flag:
         ok = False
-    print(f"{k:>3} {vc:>10,} {f'{da}/{db}':>14} {by_key:>12,} {frate:>6.2f}%{flag}")
+    print(f"{k:>3} {vc:>10,} {ncount:>9,} {by_key:>12,} {frate:>6.2f}%{flag}")
 
 # spot check: a few vectors decode to plausible values and cells partition the bucket
 print("\nspot check vector[0]:", V[0][:dims] / SCALE)
