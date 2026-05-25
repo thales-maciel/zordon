@@ -13,13 +13,15 @@ const vector = @import("vector.zig");
 ///   [labels: ceil(count/8) bytes]         1 bit per vector (1 = fraud), same order
 ///
 /// Vectors are reordered so each bucket is contiguous and, within a bucket, each
-/// grid cell is contiguous. A CellEntry therefore names a contiguous vector range
-/// plus the tight [lo,hi] extent of its two grid dimensions (for the lower bound).
+/// grid cell is contiguous. A CellEntry names a contiguous vector range plus the
+/// tight [lo,hi] bounding box of its members over all stored dimensions — used as
+/// a full-dimensional lower bound for branch-and-bound pruning.
 /// Stable format identifier — never changes. The layout version lives in the
 /// `version` header field so it can bump independently; `parse` rejects any model
 /// whose version it doesn't understand.
 pub const magic = "ZORDONDB".*;
-pub const format_version: u32 = 1;
+/// v2: CellEntry stores a full 16-dim bounding box (was the 2 grid dims only).
+pub const format_version: u32 = 2;
 pub const bucket_count = 16;
 pub const default_bins = 48;
 
@@ -54,12 +56,13 @@ pub const BucketEntry = extern struct {
 };
 
 pub const CellEntry = extern struct {
-    /// Tight extent of dim_a / dim_b over the cell's members (quantized units).
-    /// Used as a lower bound: any member's value lies within [lo, hi].
-    lo_a: i32,
-    hi_a: i32,
-    lo_b: i32,
-    hi_b: i32,
+    /// Tight axis-aligned bounding box of the cell's members over all stored dims
+    /// (quantized units): every member m satisfies box_lo[d] <= m[d] <= box_hi[d].
+    /// The squared distance from a query to this box is an exact lower bound on the
+    /// distance to any member, so a cell whose box bound is no closer than the
+    /// current 5th-nearest can be skipped wholesale.
+    box_lo: [vector.stored_dims]i16,
+    box_hi: [vector.stored_dims]i16,
     vec_start: u32,
     vec_count: u32,
 };
@@ -67,7 +70,7 @@ pub const CellEntry = extern struct {
 comptime {
     std.debug.assert(@sizeOf(Header) == 64);
     std.debug.assert(@sizeOf(BucketEntry) == 20);
-    std.debug.assert(@sizeOf(CellEntry) == 24);
+    std.debug.assert(@sizeOf(CellEntry) == 72);
 }
 
 pub const buffer_align: std.mem.Alignment = .fromByteUnits(64);
@@ -249,26 +252,21 @@ pub fn build(allocator: std.mem.Allocator, items: []const Item, bins: u16) ![]al
             const s = cell_hist[c];
             const e = cell_hist[c + 1];
             if (s == e) continue;
-            var lo_a: i32 = std.math.maxInt(i32);
-            var hi_a: i32 = std.math.minInt(i32);
-            var lo_b: i32 = std.math.maxInt(i32);
-            var hi_b: i32 = std.math.minInt(i32);
+            var box_lo: [vector.stored_dims]i16 = .{std.math.maxInt(i16)} ** vector.stored_dims;
+            var box_hi: [vector.stored_dims]i16 = .{std.math.minInt(i16)} ** vector.stored_dims;
             const cell_vec_start = out_pos;
             for (sorted[s..e]) |item_idx| {
-                const va: i32 = items[item_idx].vec[da];
-                const vb: i32 = items[item_idx].vec[db];
-                lo_a = @min(lo_a, va);
-                hi_a = @max(hi_a, va);
-                lo_b = @min(lo_b, vb);
-                hi_b = @max(hi_b, vb);
+                const v = items[item_idx].vec;
+                for (0..vector.stored_dims) |d| {
+                    box_lo[d] = @min(box_lo[d], v[d]);
+                    box_hi[d] = @max(box_hi[d], v[d]);
+                }
                 order[out_pos] = item_idx;
                 out_pos += 1;
             }
             try cells.append(allocator, .{
-                .lo_a = lo_a,
-                .hi_a = hi_a,
-                .lo_b = lo_b,
-                .hi_b = hi_b,
+                .box_lo = box_lo,
+                .box_hi = box_hi,
                 .vec_start = cell_vec_start,
                 .vec_count = e - s,
             });

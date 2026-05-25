@@ -48,7 +48,8 @@ pub fn main(init: std.process.Init) !void {
     }
     std.debug.print("model: {d} vectors | entries: {d} | valid queries: {d} | parse errors: {d}\n", .{ model.count, entries.len, valid, parse_err });
 
-    const caps = [_]u32{ 200_000, 100_000, 50_000, 30_000, 20_000, 12_000, 8_000, 5_000, 3_000, 2_000, 1_000 };
+    // First entry is effectively unbounded (= fully exact); the rest show the trade.
+    const caps = [_]u32{ 3_000_000, 1_000_000, 500_000, 200_000, 100_000, 50_000, 20_000, 8_000 };
     const scanned = try allocator.alloc(u32, valid);
     defer allocator.free(scanned);
 

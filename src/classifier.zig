@@ -7,20 +7,18 @@ const scale: i64 = vector.scale;
 /// Lower bound contributed by a single differing binary flag: (scale - 0)^2.
 const flag_penalty: i64 = scale * scale;
 /// Candidate budget per query. Cells (and buckets) are visited in ascending
-/// lower-bound order, so the nearest candidates are always scanned first. Normal
-/// queries find their 5-NN long before this and the result is exact; only very
-/// "lonely" queries (large d_5², far from all references — rare novel transactions)
-/// hit the cap and get a high-recall approximation. This bounds worst-case latency:
-/// without it, a lonely query scans an entire ~1M-vector bucket (multi-ms), which
-/// saturates the CPU under load and collapses p99. The rules permit any algorithm
-/// (ANN included), so this is a deliberate, measured exactness/latency trade.
-pub const default_max_candidates: u32 = 200_000;
+/// lower-bound order, so the nearest candidates are always scanned first. The
+/// default is effectively unbounded → the search is fully exact (0 FP / 0 FN).
+/// Lowering it (via ZORDON_MAX_CANDIDATES) trades exactness for a smaller worst
+/// case: the rare "lonely" queries (large d_5², an outlier inside a dense bucket)
+/// otherwise scan most of a ~1M-vector bucket. With the full-dimensional box bound
+/// the *mean* query is cheap (~100us on the dev host), so exact stays well under the
+/// per-instance CPU budget; the cap is kept only as a latency safety valve.
+pub const default_max_candidates: u32 = std.math.maxInt(u32);
 
-/// Upper bound on cells examined per query on the stack. The grid's first dimension
-/// is always the highest-variance one (day_of_week, 7 values), so a bucket has at
-/// most 7*bins cells (336 at bins=48). Buckets above this cap fall back to a full
-/// scan, which is still exact.
-const max_cells = 1024;
+/// Upper bound on cells examined per query on the stack (sized for bins<=64:
+/// bins*bins cells). Buckets above this cap fall back to a full scan, still exact.
+const max_cells = 4096;
 
 pub const Decision = struct {
     approved: bool,
@@ -81,26 +79,27 @@ pub const Classifier = struct {
         // 4-bit lower bound is still closer than our current 5th-nearest distance.
         // The branch-and-bound makes this exact; in practice no other bucket qualifies
         // (a differing flag costs scale^2, far beyond any real neighbour distance).
-        self.scanBucket(own, q, qv, &top, cap);
+        self.scanBucket(own, qv, &top, cap);
         for (0..model_mod.bucket_count) |kk| {
             if (kk == own) continue;
             if (top.scanned >= cap) break;
             if (bucketLowerBound(q, @intCast(kk)) < top.worst()) {
-                self.scanBucket(@intCast(kk), q, qv, &top, cap);
+                self.scanBucket(@intCast(kk), qv, &top, cap);
             }
         }
         return top;
     }
 
     /// Stage 2: branch-and-bound over the bucket's grid cells. Each cell's lower
-    /// bound is the squared gap to the query over the two grid dimensions; cells are
-    /// visited nearest-bound-first and pruned once a bound reaches the current
-    /// 5th-nearest distance. Exact, because the bound never overestimates.
+    /// bound is the squared distance from the query to the cell's full-dimensional
+    /// bounding box; cells are visited nearest-bound-first and pruned once a bound
+    /// reaches the current 5th-nearest distance. Exact, because the box bound never
+    /// overestimates the distance to any member.
     ///
     /// Visited by repeated min-extraction rather than a full sort: the nearest cell
     /// tightens the bound immediately, so typically only ~1-9 of the (≤336) cells are
     /// ever scanned — cheaper than sorting them all every query.
-    fn scanBucket(self: Classifier, key: u4, q: vector.QuantizedVector, qv: @Vector(dims, i32), top: *TopK, cap: u32) void {
+    fn scanBucket(self: Classifier, key: u4, qv: @Vector(dims, i32), top: *TopK, cap: u32) void {
         const bucket = self.model.buckets[key];
         if (bucket.vec_count == 0) return;
         const cells = self.model.cells[bucket.cell_start..][0..bucket.cell_count];
@@ -109,14 +108,10 @@ pub const Classifier = struct {
             return;
         }
 
-        const qa: i64 = q[bucket.dim_a];
-        const qb: i64 = q[bucket.dim_b];
-        // Pass 1: lower bound per cell.
+        // Pass 1: full bounding-box lower bound per cell.
         var lbs: [max_cells]i64 = undefined;
         for (cells, 0..) |cell, i| {
-            const ga = gap(qa, cell.lo_a, cell.hi_a);
-            const gb = gap(qb, cell.lo_b, cell.hi_b);
-            lbs[i] = ga * ga + gb * gb;
+            lbs[i] = cellLowerBound(qv, cell.box_lo, cell.box_hi);
         }
 
         // Pass 2: scan cells in ascending-bound order (repeated min), pruning the
@@ -148,11 +143,19 @@ pub const Classifier = struct {
     }
 };
 
-/// Distance from a point to the closed interval [lo, hi] (0 if inside).
-inline fn gap(q: i64, lo: i32, hi: i32) i64 {
-    if (q < lo) return lo - q;
-    if (q > hi) return q - hi;
-    return 0;
+/// Squared distance from the query to a cell's axis-aligned bounding box — an exact
+/// lower bound on the distance to any member of the cell. Over all 16 lanes at once:
+/// each lane's gap is (lo - q) when q < lo, (q - hi) when q > hi, else 0 (the two
+/// maxes are mutually exclusive). Widened to i64 before the reduce (16 lanes of up to
+/// ~4e8 would overflow i32).
+inline fn cellLowerBound(qv: @Vector(dims, i32), lo: [dims]i16, hi: [dims]i16) i64 {
+    const loi: @Vector(dims, i32) = @intCast(@as(@Vector(dims, i16), lo));
+    const hii: @Vector(dims, i32) = @intCast(@as(@Vector(dims, i16), hi));
+    const zero: @Vector(dims, i32) = @splat(0);
+    const d = @max(loi - qv, zero) + @max(qv - hii, zero);
+    const sq_vec: @Vector(dims, i32) = d * d;
+    const sq64: @Vector(dims, i64) = @intCast(sq_vec);
+    return @reduce(.Add, sq64);
 }
 
 /// Squared Euclidean distance over the 16 stored lanes, widened to i64 so the

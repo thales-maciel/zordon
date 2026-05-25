@@ -20,7 +20,7 @@ magic, version, count, dims, sdims, scale, bins, bcount = struct.unpack_from("<8
 cell_count, buckets_off, cells_off, vectors_off, labels_off = struct.unpack_from("<IQQQQ", buf, 28)
 print(f"magic={magic!r} version={version} count={count:,} dims={dims} stored={sdims} scale={scale} "
       f"bins={bins} buckets={bcount} cells={cell_count}")
-assert magic == b"ZORDONDB" and version == 1 and count == 3_000_000 and dims == 14 and sdims == SDIMS and scale == SCALE
+assert magic == b"ZORDONDB" and version == 2 and count == 3_000_000 and dims == 14 and sdims == SDIMS and scale == SCALE
 
 # vectors: count x 16 i16
 V = np.frombuffer(buf, dtype="<i2", count=count * SDIMS, offset=vectors_off).reshape(count, SDIMS)

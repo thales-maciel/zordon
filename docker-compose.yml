@@ -27,7 +27,7 @@ services:
     environment:
       ZORDON_MODEL_PATH: "/app/model/references.i16.bin"
       ZORDON_UNIX_PATH: "/sock/api1.sock"
-      ZORDON_MAX_CANDIDATES: "${ZORDON_MAX_CANDIDATES:-30000}"
+      ZORDON_MAX_CANDIDATES: "${ZORDON_MAX_CANDIDATES:-}"
     volumes:
       - sockets:/sock
     deploy:
@@ -43,7 +43,7 @@ services:
     environment:
       ZORDON_MODEL_PATH: "/app/model/references.i16.bin"
       ZORDON_UNIX_PATH: "/sock/api2.sock"
-      ZORDON_MAX_CANDIDATES: "${ZORDON_MAX_CANDIDATES:-30000}"
+      ZORDON_MAX_CANDIDATES: "${ZORDON_MAX_CANDIDATES:-}"
     volumes:
       - sockets:/sock
     deploy:
