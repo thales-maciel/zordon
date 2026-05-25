@@ -19,6 +19,13 @@ pub fn main(init: std.process.Init) !void {
     };
     defer classifier.deinit(allocator);
 
+    // Per-query candidate budget — the exactness/latency knob. Tunable via deploy
+    // config (no rebuild) so the optimum can be found against the contest hardware.
+    if (init.environ_map.get("ZORDON_MAX_CANDIDATES")) |raw| {
+        classifier.max_candidates = std.fmt.parseInt(u32, raw, 10) catch classifier.max_candidates;
+    }
+    std.log.info("max_candidates = {d}", .{classifier.max_candidates});
+
     const server = server_mod.Server{
         .classifier = &classifier,
         .allocator = allocator,

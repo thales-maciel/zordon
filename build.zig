@@ -103,6 +103,21 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| bench_req_cmd.addArgs(args);
     bench_req_step.dependOn(&bench_req_cmd.step);
 
+    const sweep = b.addExecutable(.{
+        .name = "sweep",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/sweep.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "zordon", .module = zordon_mod }},
+        }),
+    });
+    const sweep_step = b.step("sweep", "Sweep candidate budgets: detection + scan-cost over the full test set");
+    const sweep_cmd = b.addRunArtifact(sweep);
+    if (b.args) |args| sweep_cmd.addArgs(args);
+    sweep_step.dependOn(&sweep_cmd.step);
+
     const tests = b.addTest(.{
         .root_module = zordon_mod,
     });

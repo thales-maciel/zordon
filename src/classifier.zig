@@ -14,7 +14,7 @@ const flag_penalty: i64 = scale * scale;
 /// without it, a lonely query scans an entire ~1M-vector bucket (multi-ms), which
 /// saturates the CPU under load and collapses p99. The rules permit any algorithm
 /// (ANN included), so this is a deliberate, measured exactness/latency trade.
-const max_candidates: u32 = 200_000;
+pub const default_max_candidates: u32 = 200_000;
 
 /// Upper bound on cells examined per query on the stack. The grid's first dimension
 /// is always the highest-variance one (day_of_week, 7 values), so a bucket has at
@@ -31,6 +31,10 @@ pub const Decision = struct {
 
 pub const Classifier = struct {
     model: model_mod.Model,
+    /// Candidate budget per query (see `default_max_candidates`). Set at startup
+    /// from ZORDON_MAX_CANDIDATES so the exactness/latency trade can be tuned via
+    /// deploy config without rebuilding the image.
+    max_candidates: u32 = default_max_candidates,
 
     pub fn deinit(self: *Classifier, allocator: std.mem.Allocator) void {
         self.model.deinit(allocator);
@@ -39,7 +43,7 @@ pub const Classifier = struct {
 
     pub fn decide(self: Classifier, query: vector.Vector) Decision {
         const q = vector.quantize(query);
-        const top = self.nearest(q);
+        const top = self.nearestCap(q, self.max_candidates);
         const k = top.k;
         if (k == 0) {
             return .{ .approved = true, .fraud_score = 0.0, .fraud_neighbors = 0, .neighbors = 0 };
@@ -57,8 +61,15 @@ pub const Classifier = struct {
         };
     }
 
-    /// Exact k-nearest search (k <= 5) over the bucketed index.
+    /// Exact k-nearest search (k <= 5) over the bucketed index, using the default
+    /// candidate budget (the production path).
     pub fn nearest(self: Classifier, q: vector.QuantizedVector) TopK {
+        return self.nearestCap(q, default_max_candidates);
+    }
+
+    /// As `nearest`, but with an explicit candidate budget `cap`. Used by offline
+    /// sweeps to measure the exactness/latency trade at different budgets.
+    pub fn nearestCap(self: Classifier, q: vector.QuantizedVector, cap: u32) TopK {
         const k: usize = @min(5, self.model.count);
         var top = TopK{ .k = k };
         if (k == 0) return top;
@@ -70,12 +81,12 @@ pub const Classifier = struct {
         // 4-bit lower bound is still closer than our current 5th-nearest distance.
         // The branch-and-bound makes this exact; in practice no other bucket qualifies
         // (a differing flag costs scale^2, far beyond any real neighbour distance).
-        self.scanBucket(own, q, qv, &top);
+        self.scanBucket(own, q, qv, &top, cap);
         for (0..model_mod.bucket_count) |kk| {
             if (kk == own) continue;
-            if (top.scanned >= max_candidates) break;
+            if (top.scanned >= cap) break;
             if (bucketLowerBound(q, @intCast(kk)) < top.worst()) {
-                self.scanBucket(@intCast(kk), q, qv, &top);
+                self.scanBucket(@intCast(kk), q, qv, &top, cap);
             }
         }
         return top;
@@ -89,7 +100,7 @@ pub const Classifier = struct {
     /// Visited by repeated min-extraction rather than a full sort: the nearest cell
     /// tightens the bound immediately, so typically only ~1-9 of the (≤336) cells are
     /// ever scanned — cheaper than sorting them all every query.
-    fn scanBucket(self: Classifier, key: u4, q: vector.QuantizedVector, qv: @Vector(dims, i32), top: *TopK) void {
+    fn scanBucket(self: Classifier, key: u4, q: vector.QuantizedVector, qv: @Vector(dims, i32), top: *TopK, cap: u32) void {
         const bucket = self.model.buckets[key];
         if (bucket.vec_count == 0) return;
         const cells = self.model.cells[bucket.cell_start..][0..bucket.cell_count];
@@ -122,7 +133,7 @@ pub const Classifier = struct {
             if (best_i == cells.len or best_lb >= top.worst()) break;
             lbs[best_i] = std.math.maxInt(i64); // mark scanned
             self.scanRange(cells[best_i].vec_start, cells[best_i].vec_count, qv, top);
-            if (top.scanned >= max_candidates) break;
+            if (top.scanned >= cap) break;
         }
     }
 
